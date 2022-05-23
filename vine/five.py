@@ -82,6 +82,9 @@ except ImportError:                         # pragma: no cover
 #  ############# time.monotonic #############################################
 
 if sys.version_info < (3, 3):
+    from time import time as time_monotonic
+    # the worst resolution is 15.6 ms on Windows
+    time_monotonic_resolution = 0.050
 
     import platform
     SYSTEM = platform.system()
@@ -92,19 +95,51 @@ if sys.version_info < (3, 3):
         ctypes = None  # noqa
 
     if SYSTEM == 'Darwin' and ctypes is not None:
+        try:
+            import ctypes.util
+            libc_name = ctypes.util.find_library('c')
+        except ImportError:
+            logger.error("time_monotonic import error", exc_info=True)
+            libc_name = None
+        if libc_name:
+            libc = ctypes.CDLL(libc_name, use_errno=True)
+
+            mach_absolute_time = libc.mach_absolute_time
+            mach_absolute_time.argtypes = ()
+            mach_absolute_time.restype = ctypes.c_uint64
+
+            class mach_timebase_info_data_t(ctypes.Structure):
+                _fields_ = (
+                    ('numer', ctypes.c_uint32),
+                    ('denom', ctypes.c_uint32),
+                )
+            mach_timebase_info_data_p = ctypes.POINTER(mach_timebase_info_data_t)
+
+            mach_timebase_info = libc.mach_timebase_info
+            mach_timebase_info.argtypes = (mach_timebase_info_data_p,)
+            mach_timebase_info.restype = ctypes.c_int
+
+            def _monotonic():
+                return mach_absolute_time() * time_monotonic.factor
+
+            timebase = mach_timebase_info_data_t()
+            mach_timebase_info(ctypes.byref(timebase))
+            time_monotonic.factor = float(timebase.numer) / timebase.denom * 1e-9
+            time_monotonic_resolution = time_monotonic.factor
+            del timebase
         # from ctypes.util import find_library
         # libSystem = ctypes.CDLL(find_library('libSystem.dylib'))
         # CoreServices = ctypes.CDLL(find_library('CoreServices'),
         #                            use_errno=True)
         # mach_absolute_time = libSystem.mach_absolute_time
         # mach_absolute_time.restype = ctypes.c_uint64
+        
         # absolute_to_nanoseconds = CoreServices.AbsoluteToNanoseconds
         # absolute_to_nanoseconds.restype = ctypes.c_uint64
         # absolute_to_nanoseconds.argtypes = [ctypes.c_uint64]
 
         def _monotonic():
-            return 100
-            # return absolute_to_nanoseconds(mach_absolute_time()) * 1e-9
+            return time_monotonic()
 
     elif SYSTEM == 'Linux' and ctypes is not None:
         # from stackoverflow:
